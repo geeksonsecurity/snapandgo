@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"syscall"
+
+	"snapandgo/internal/snapshot"
 )
 
 const mainAddr = 0x555555555303
@@ -78,7 +80,7 @@ func main() {
 	}
 	log.Printf("Result %d", r1)
 
-	targetPid, err := syscall.ForkExec("./demo/target", []string{}, &procAttr)
+	targetPid, err := syscall.ForkExec("./tools/demo/target", []string{}, &procAttr)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -109,6 +111,8 @@ func main() {
 		}
 
 		if wstat.StopSignal() == 5 {
+			// main
+			snapshot.TakeSnapshot(targetPid)
 			break
 		}
 
