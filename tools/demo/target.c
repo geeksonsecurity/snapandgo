@@ -106,6 +106,7 @@ int main(int argc, char** argv) {
         printf("Usage: ./target <argument>\n");
         exit(1);
     }
+	printf("Processing %s\n", argv[1]);
 	// Snapshot start location
 	startf();
 	// Function under test

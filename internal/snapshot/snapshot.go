@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"log"
 	"os"
@@ -85,10 +86,13 @@ func (p *Manager) TakeSnapshot() {
 		log.Fatal(err)
 	}
 
-	for _, s := range p.writableSections {
+	for idx := range p.writableSections {
+		s := p.writableSections[idx]
 		log.Printf("Reading 0x%x-0x%x [%d bytes] - %s - %s", s.From, s.To, s.Size, s.Perms, s.Module)
-		s.Content = ptrace.Read(p.Pid, uintptr(s.From), s.Size)
-		if uint64(len(s.Content)) != s.Size {
+		// TODO: is this the right way to update the object correctly?
+		// Doing s.Content will result in the array not being persisted
+		p.writableSections[idx].Content = ptrace.Read(p.Pid, uintptr(s.From), s.Size)
+		if uint64(len(p.writableSections[idx].Content)) != s.Size {
 			log.Panic("Failed to read bytes from target process!")
 		}
 	}
@@ -121,4 +125,16 @@ func (p *Manager) RewindEIP() {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+// Locate locate payload in RW sections
+func (p *Manager) Locate(payload []byte) uint64 {
+	for _, s := range p.writableSections {
+		log.Printf("Searching in 0x%x-0x%x [%d bytes]", s.From, s.To, len(s.Content))
+		idx := bytes.Index(s.Content, payload)
+		if idx > -1 {
+			return s.From + uint64(idx)
+		}
+	}
+	return 0
 }

@@ -35,7 +35,8 @@ func main() {
 	}
 	log.Printf("Result %d", r1)
 
-	targetPid, err := syscall.ForkExec("./tools/demo/target", []string{}, &procAttr)
+	initialPayload := "deadbeef"
+	targetPid, err := syscall.ForkExec("./tools/demo/target", []string{"target", initialPayload}, &procAttr)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -58,7 +59,6 @@ func main() {
 
 	fmt.Println("Waiting to reach main..")
 	syscall.Wait4(targetPid, &wstat, 0, nil)
-
 	if wstat.StopSignal() == 5 {
 		// main
 		snapshot.TakeSnapshot()
@@ -66,6 +66,13 @@ func main() {
 		ptrace.Write(targetPid, mainAddr, originalMainByte)
 		// rewind EIP
 		snapshot.RewindEIP()
+		// locate payload
+		ptr := snapshot.Locate([]byte(initialPayload))
+		if ptr <= 0 {
+			log.Fatalf("Unable to locate payload '%s' in RW sections!", initialPayload)
+		} else {
+			log.Printf("Initial payload '%s' located at 0x%x", initialPayload, ptr)
+		}
 		// continue
 		syscall.PtraceCont(targetPid, 0)
 	} else {
