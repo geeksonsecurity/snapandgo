@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -51,34 +50,44 @@ func main() {
 	_, err = syscall.Wait4(targetPid, &wstat, 0, nil)
 	fmt.Printf("Status: %s (%d)\n", utils.ExplainWaitStatus(wstat), wstat)
 
-	// set breakpoint at main and let continue
-	// First byte in main
-	log.Printf("Read %s", hex.Dump(ptrace.Read(targetPid, mainAddr, 1)))
+	originalMainByte := ptrace.Read(targetPid, mainAddr, 1)
 
 	// Replace it with software breakpoint 0xCC
 	ptrace.Write(targetPid, mainAddr, []byte{0xCC})
 	syscall.PtraceCont(targetPid, 0)
 
+	fmt.Println("Waiting to reach main..")
+	syscall.Wait4(targetPid, &wstat, 0, nil)
+
+	if wstat.StopSignal() == 5 {
+		// main
+		snapshot.TakeSnapshot()
+		// revert main breakpoint
+		ptrace.Write(targetPid, mainAddr, originalMainByte)
+		// rewind EIP
+		snapshot.RewindEIP()
+		// continue
+		syscall.PtraceCont(targetPid, 0)
+	} else {
+		log.Fatalf("We expected main to be found: %s", utils.ExplainWaitStatus(wstat))
+	}
+
+	log.Printf("Entering main fuzzing loop...")
 	for {
-		fmt.Println("Waiting..")
-		_, err := syscall.Wait4(targetPid, &wstat, 0, nil)
-		fmt.Printf("Status: %s (%d)\n", utils.ExplainWaitStatus(wstat), wstat)
+		syscall.Wait4(targetPid, &wstat, 0, nil)
 
-		if err != nil {
-			fmt.Println(err)
-			break
-		}
-
+		// exit bp hit
 		if wstat.StopSignal() == 5 {
-			// main
-			snapshot.TakeSnapshot()
+			log.Printf("BP, EIP 0x%x", ptrace.GetEIP(targetPid))
+			snapshot.RestoreSnapshot()
+		} else {
+			log.Printf("%s", utils.ExplainWaitStatus(wstat))
 			break
 		}
+		syscall.PtraceCont(targetPid, 0)
 
 		//log.Printf("Read %s", hex.Dump(read(targetPid, mainAddr, 1)))
-		syscall.PtraceCont(targetPid, 0)
 		//fmt.Printf("syscall: %d\n", regs.Orig_rax)
 		//syscall.PtraceSyscall(targetPid, 0)
 	}
-	snapshot.RestoreSnapshot()
 }

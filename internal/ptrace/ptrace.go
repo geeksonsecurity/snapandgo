@@ -25,6 +25,22 @@ func Write(pid int, addr uintptr, bytes []byte) bool {
 	return res == 0
 }
 
+// GetEIP Return EIP
+func GetEIP(pid int) uint64 {
+	var regs syscall.PtraceRegs
+	syscall.PtraceGetRegs(pid, &regs)
+	return regs.PC()
+}
+
+// SetEIP set EIP
+func SetEIP(pid int, newEIP uint64) uint64 {
+	var regs syscall.PtraceRegs
+	syscall.PtraceGetRegs(pid, &regs)
+	regs.SetPC(newEIP)
+	syscall.PtraceSetRegs(pid, &regs)
+	return regs.PC()
+}
+
 // SaveRegisters save registers (-_-)
 func SaveRegisters(pid int, regs *syscall.PtraceRegs) {
 	err := syscall.PtraceGetRegs(pid, regs)

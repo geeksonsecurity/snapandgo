@@ -110,3 +110,15 @@ func (p *Manager) RestoreSnapshot() {
 	ptrace.RestoreRegisters(p.Pid, &p.registers)
 	log.Printf("Registers restored! EIP: 0x%x", p.registers.PC())
 }
+
+// RewindEIP rewind EIP by one
+func (p *Manager) RewindEIP() {
+	// rewin RIP
+	var regs syscall.PtraceRegs
+	syscall.PtraceGetRegs(p.Pid, &regs)
+	regs.SetPC(regs.PC() - 1)
+	err := syscall.PtraceSetRegs(p.Pid, &regs)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
