@@ -50,8 +50,8 @@ type MemorySection struct {
 
 // Manager self explaining
 type Manager struct {
-	writableSections []MemorySection
-	sections         []MemorySection
+	writableSections []*MemorySection
+	sections         []*MemorySection
 	Pid              int
 	registers        syscall.PtraceRegs
 }
@@ -76,9 +76,9 @@ func (p *Manager) TakeSnapshot() {
 		section.Perms = Permission{lineTokens[1]}
 		section.Module = lineTokens[5]
 		section.Size = section.To - section.From
-		p.sections = append(p.sections, section)
+		p.sections = append(p.sections, &section)
 		if section.Perms.Writable() {
-			p.writableSections = append(p.writableSections, section)
+			p.writableSections = append(p.writableSections, &section)
 		}
 	}
 
@@ -86,13 +86,12 @@ func (p *Manager) TakeSnapshot() {
 		log.Fatal(err)
 	}
 
-	for idx := range p.writableSections {
-		s := p.writableSections[idx]
+	for _, s := range p.writableSections {
 		log.Printf("Reading 0x%x-0x%x [%d bytes] - %s - %s", s.From, s.To, s.Size, s.Perms, s.Module)
 		// TODO: is this the right way to update the object correctly?
 		// Doing s.Content will result in the array not being persisted
-		p.writableSections[idx].Content = ptrace.Read(p.Pid, uintptr(s.From), s.Size)
-		if uint64(len(p.writableSections[idx].Content)) != s.Size {
+		s.Content = ptrace.Read(p.Pid, uintptr(s.From), s.Size)
+		if uint64(len(s.Content)) != s.Size {
 			log.Panic("Failed to read bytes from target process!")
 		}
 	}
