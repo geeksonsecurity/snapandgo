@@ -11,7 +11,8 @@ import (
 	"snapandgo/internal/utils"
 )
 
-const mainAddr = 0x555555555303
+const base = 0x555555555000
+const mainAddr = base + 0x304
 
 //ADDR_NO_RANDOMIZE disable randomization of VA space
 const ADDR_NO_RANDOMIZE = 0x0040000
