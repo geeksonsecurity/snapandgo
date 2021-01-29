@@ -50,32 +50,11 @@ type MemorySection struct {
 
 // Manager self explaining
 type Manager struct {
-	Pid  int
-	Base uint64
+	Pid int
 
 	writableSections []*MemorySection
 	sections         []*MemorySection
 	registers        syscall.PtraceRegs
-	breakpoints      []uint64
-}
-
-// LoadBreakpoints loads breakpoints from file
-func (p *Manager) LoadBreakpoints(bpFile string) {
-	inFile, err := os.Open(bpFile)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer inFile.Close()
-
-	scanner := bufio.NewScanner(inFile)
-
-	for scanner.Scan() {
-		val, _ := strconv.ParseUint(strings.Replace(scanner.Text(), "0x", "", -1), 16, 64)
-		p.breakpoints = append(p.breakpoints, val)
-		//log.Printf("0x%x / %s", val, scanner.Text())
-	}
-
-	log.Printf("Loaded %d breakpoints", len(p.breakpoints))
 }
 
 // TakeSnapshot takes a memory snapshot of all writable memory region for given pid
