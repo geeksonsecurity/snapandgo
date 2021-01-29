@@ -50,10 +50,32 @@ type MemorySection struct {
 
 // Manager self explaining
 type Manager struct {
+	Pid  int
+	Base uint64
+
 	writableSections []*MemorySection
 	sections         []*MemorySection
-	Pid              int
 	registers        syscall.PtraceRegs
+	breakpoints      []uint64
+}
+
+// LoadBreakpoints loads breakpoints from file
+func (p *Manager) LoadBreakpoints(bpFile string) {
+	inFile, err := os.Open(bpFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer inFile.Close()
+
+	scanner := bufio.NewScanner(inFile)
+
+	for scanner.Scan() {
+		val, _ := strconv.ParseUint(strings.Replace(scanner.Text(), "0x", "", -1), 16, 64)
+		p.breakpoints = append(p.breakpoints, val)
+		//log.Printf("0x%x / %s", val, scanner.Text())
+	}
+
+	log.Printf("Loaded %d breakpoints", len(p.breakpoints))
 }
 
 // TakeSnapshot takes a memory snapshot of all writable memory region for given pid
@@ -105,9 +127,9 @@ func (p *Manager) RestoreSnapshot() {
 	log.Printf("Restoring snapshot for PID %d", p.Pid)
 	for _, s := range p.writableSections {
 		log.Printf("Restoring 0x%x-0x%x [%d bytes] - %s - %s", s.From, s.To, s.Size, s.Perms, s.Module)
-		success := ptrace.Write(p.Pid, uintptr(s.From), s.Content)
-		if !success {
-			log.Panic("Failed to write bytes to target process!")
+		written := ptrace.Write(p.Pid, uintptr(s.From), s.Content)
+		if uint64(written) != s.Size {
+			log.Panicf("Failed to write all %d bytes to target process, wrote %d only!", s.Size, written)
 		}
 	}
 	ptrace.RestoreRegisters(p.Pid, &p.registers)

@@ -11,8 +11,10 @@ import (
 	"snapandgo/internal/utils"
 )
 
+// TODO: Autocompute those values
 const base = 0x555555555000
 const mainAddr = base + 0x304
+const exitAddr = base + 0x36a
 
 //ADDR_NO_RANDOMIZE disable randomization of VA space
 const ADDR_NO_RANDOMIZE = 0x0040000
@@ -44,8 +46,11 @@ func main() {
 
 	log.Printf("Started target process with PID %d", targetPid)
 	snapshot := snapshot.Manager{
-		Pid: targetPid,
+		Pid:  targetPid,
+		Base: base,
 	}
+
+	snapshot.LoadBreakpoints("./tools/demo/breakpoints.txt")
 
 	// waiting stop at entrypoint
 	var wstat syscall.WaitStatus
@@ -54,25 +59,26 @@ func main() {
 
 	originalMainByte := ptrace.Read(targetPid, mainAddr, 1)
 
-	// Replace it with software breakpoint 0xCC
+	// Replace main/exit with software breakpoint 0xCC
 	ptrace.Write(targetPid, mainAddr, []byte{0xCC})
+	ptrace.Write(targetPid, exitAddr, []byte{0xCC})
 	syscall.PtraceCont(targetPid, 0)
 
-	fmt.Println("Waiting to reach main..")
+	fmt.Println("Waiting to reach main() breakpoint..")
 	syscall.Wait4(targetPid, &wstat, 0, nil)
+	var payloadPtr uint64
 	if wstat.StopSignal() == 5 {
-		// main
 		snapshot.TakeSnapshot()
 		// revert main breakpoint
 		ptrace.Write(targetPid, mainAddr, originalMainByte)
 		// rewind EIP
 		snapshot.RewindEIP()
 		// locate payload
-		ptr := snapshot.Locate([]byte(initialPayload))
-		if ptr <= 0 {
+		payloadPtr = snapshot.Locate([]byte(initialPayload))
+		if payloadPtr <= 0 {
 			log.Fatalf("Unable to locate payload '%s' in RW sections!", initialPayload)
 		} else {
-			log.Printf("Initial payload '%s' located at 0x%x", initialPayload, ptr)
+			log.Printf("Initial payload '%s' located at 0x%x", initialPayload, payloadPtr)
 		}
 		// continue
 		syscall.PtraceCont(targetPid, 0)
@@ -80,22 +86,29 @@ func main() {
 		log.Fatalf("We expected main to be found: %s", utils.ExplainWaitStatus(wstat))
 	}
 
+	loopCount := 0
 	log.Printf("Entering main fuzzing loop...")
 	for {
 		syscall.Wait4(targetPid, &wstat, 0, nil)
-
+		log.Printf("[+] %d loop - EIP 0x%x", loopCount, ptrace.GetEIP(targetPid))
 		// exit bp hit
 		if wstat.StopSignal() == 5 {
-			log.Printf("BP, EIP 0x%x", ptrace.GetEIP(targetPid))
-			snapshot.RestoreSnapshot()
+			eip := ptrace.GetEIP(targetPid)
+			log.Printf("BP, EIP 0x%x", eip)
+			if eip-1 == exitAddr {
+				log.Printf("Exit BP hit, restoring snapshot!")
+				snapshot.RestoreSnapshot()
+				// override input param
+				ptrace.Write(targetPid, uintptr(payloadPtr), []byte{0x41, 0x42, 0x43, 0x44, 0x0})
+				loopCount++
+			} else {
+				log.Printf("Unknown breakpoint!")
+				break
+			}
 		} else {
-			log.Printf("%s", utils.ExplainWaitStatus(wstat))
+			log.Printf("INTERRUPTED! Reason: %s", utils.ExplainWaitStatus(wstat))
 			break
 		}
 		syscall.PtraceCont(targetPid, 0)
-
-		//log.Printf("Read %s", hex.Dump(read(targetPid, mainAddr, 1)))
-		//fmt.Printf("syscall: %d\n", regs.Orig_rax)
-		//syscall.PtraceSyscall(targetPid, 0)
 	}
 }

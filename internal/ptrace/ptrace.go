@@ -17,12 +17,12 @@ func Read(pid int, addr uintptr, count uint64) []byte {
 }
 
 // Write bytes to given PID address
-func Write(pid int, addr uintptr, bytes []byte) bool {
+func Write(pid int, addr uintptr, bytes []byte) uint {
 	res, err := syscall.PtracePokeText(pid, addr, bytes)
 	if err != nil {
 		log.Fatal(err)
 	}
-	return res == 0
+	return uint(res)
 }
 
 // GetEIP Return EIP
