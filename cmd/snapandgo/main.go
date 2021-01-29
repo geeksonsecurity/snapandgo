@@ -68,11 +68,12 @@ func main() {
 	syscall.Wait4(targetPid, &wstat, 0, nil)
 	var payloadPtr uint64
 	if wstat.StopSignal() == 5 {
-		snapshot.TakeSnapshot()
 		// revert main breakpoint
 		ptrace.Write(targetPid, mainAddr, originalMainByte)
 		// rewind EIP
 		snapshot.RewindEIP()
+		// Snapshot!
+		snapshot.TakeSnapshot()
 		// locate payload
 		payloadPtr = snapshot.Locate([]byte(initialPayload))
 		if payloadPtr <= 0 {
