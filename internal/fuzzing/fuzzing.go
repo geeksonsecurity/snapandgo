@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"log"
 	"os"
+	"runtime"
 	"snapandgo/internal/ptrace"
 	"snapandgo/internal/snapshot"
 	"snapandgo/internal/utils"
@@ -73,6 +74,7 @@ func (p *Fuzzer) Init(target string, breakpointsPath string) {
 	p.initialPayload = "deadbeef"
 
 	var err error
+	runtime.LockOSThread()
 	p.targetPid, err = syscall.ForkExec(target, []string{"target", p.initialPayload}, &procAttr)
 	if err != nil {
 		log.Fatal(err)
@@ -157,4 +159,5 @@ func (p *Fuzzer) Fuzz() {
 			break
 		}
 	}
+	runtime.UnlockOSThread()
 }
