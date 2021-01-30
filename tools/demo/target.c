@@ -104,9 +104,9 @@ int main(int argc, char** argv) {
 
     if (argc < 2) {
         printf("Usage: ./target <argument>\n");
-        exit(1);
+        exit(0);
     }
-	printf("Processing %s\n", argv[1]);
+	//printf("Processing %s\n", argv[1]);
 	// Snapshot start location
 	startf();
 	// Function under test

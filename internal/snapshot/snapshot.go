@@ -103,16 +103,16 @@ func (p *Manager) TakeSnapshot() {
 
 // RestoreSnapshot restore writable pages in the target process
 func (p *Manager) RestoreSnapshot() {
-	log.Printf("Restoring snapshot for PID %d", p.Pid)
+	//log.Printf("Restoring snapshot for PID %d", p.Pid)
 	for _, s := range p.writableSections {
-		log.Printf("Restoring 0x%x-0x%x [%d bytes] - %s - %s", s.From, s.To, s.Size, s.Perms, s.Module)
+		//log.Printf("Restoring 0x%x-0x%x [%d bytes] - %s - %s", s.From, s.To, s.Size, s.Perms, s.Module)
 		written := ptrace.Write(p.Pid, uintptr(s.From), s.Content)
 		if uint64(written) != s.Size {
 			log.Panicf("Failed to write all %d bytes to target process, wrote %d only!", s.Size, written)
 		}
 	}
 	ptrace.RestoreRegisters(p.Pid, &p.registers)
-	log.Printf("Registers restored! EIP: 0x%x", p.registers.PC())
+	//log.Printf("Registers restored! EIP: 0x%x", p.registers.PC())
 }
 
 // RewindEIP rewind EIP by one

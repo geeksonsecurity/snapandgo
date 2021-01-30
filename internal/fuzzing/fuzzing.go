@@ -2,7 +2,6 @@ package fuzzing
 
 import (
 	"bufio"
-	"fmt"
 	"log"
 	"os"
 	"snapandgo/internal/ptrace"
@@ -11,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Fuzzer handle the fuzzing stuff
@@ -24,6 +24,8 @@ type Fuzzer struct {
 	mainAddr       uintptr
 	exitAddr       uintptr
 	payloadPtr     uint64
+	startTime      time.Time
+	iterationCount uint64
 }
 
 func (p *Fuzzer) loadBreakpoints(bpFile string) {
@@ -49,11 +51,19 @@ func (p *Fuzzer) mutateInput() {
 	ptrace.Write(p.targetPid, uintptr(p.payloadPtr), []byte{0x41, 0x42, 0x43, 0x44, 0x0})
 }
 
+func (p *Fuzzer) printStats() {
+	elapsed := time.Since(p.startTime)
+	log.Printf("[%10.4f] cases %.10d | fcps %8.4f", elapsed.Seconds(), p.iterationCount, float64(p.iterationCount)/elapsed.Seconds())
+}
+
 // Init the Fuzzer instance
 func (p *Fuzzer) Init(target string, breakpointsPath string) {
+
+	devNull := os.NewFile(0, os.DevNull)
+	//FIXME: why child keeps sending output to stdout?
 	procAttr := syscall.ProcAttr{
 		Dir:   "",
-		Files: []uintptr{os.Stdin.Fd(), os.Stdout.Fd(), os.Stderr.Fd()},
+		Files: []uintptr{devNull.Fd(), devNull.Fd(), devNull.Fd()},
 		Env:   []string{},
 		Sys: &syscall.SysProcAttr{
 			Ptrace: true,
@@ -68,7 +78,7 @@ func (p *Fuzzer) Init(target string, breakpointsPath string) {
 		log.Fatal(err)
 	}
 
-	log.Printf("Started target process with PID %d", p.targetPid)
+	log.Printf("Started target process with PID %d, Parent is %d", p.targetPid, os.Getpid())
 	p.snapshot = &snapshot.Manager{
 		Pid: p.targetPid,
 	}
@@ -78,14 +88,12 @@ func (p *Fuzzer) Init(target string, breakpointsPath string) {
 
 // Fuzz Start fuzzing task
 func (p *Fuzzer) Fuzz() {
-
-	p.mainAddr = uintptr(p.Base + 0x304)
-	p.exitAddr = uintptr(p.Base + 0x36a)
+	p.mainAddr = uintptr(p.Base + 0x2f4)
+	p.exitAddr = uintptr(p.Base + 0x39c)
 
 	// waiting stop at entrypoint
 	var wstat syscall.WaitStatus
 	syscall.Wait4(p.targetPid, &wstat, 0, nil)
-	fmt.Printf("Status: %s (%d)\n", utils.ExplainWaitStatus(wstat), wstat)
 
 	originalMainByte := ptrace.Read(p.targetPid, p.mainAddr, 1)
 
@@ -94,7 +102,7 @@ func (p *Fuzzer) Fuzz() {
 	ptrace.Write(p.targetPid, p.exitAddr, []byte{0xCC})
 	syscall.PtraceCont(p.targetPid, 0)
 
-	fmt.Println("Waiting to reach main() breakpoint..")
+	log.Println("Waiting to reach main() breakpoint..")
 	syscall.Wait4(p.targetPid, &wstat, 0, nil)
 	if wstat.StopSignal() == 5 {
 		// revert main breakpoint
@@ -116,20 +124,24 @@ func (p *Fuzzer) Fuzz() {
 		log.Fatalf("We expected main to be found: %s", utils.ExplainWaitStatus(wstat))
 	}
 
-	loopCount := 0
+	p.iterationCount = 0
+	p.startTime = time.Now()
 	log.Printf("Entering main fuzzing loop...")
 	for {
+		if p.iterationCount%50 == 0 {
+			p.printStats()
+		}
 		syscall.Wait4(p.targetPid, &wstat, 0, nil)
-		log.Printf("[+] %d loop - EIP 0x%x", loopCount, ptrace.GetEIP(p.targetPid))
+		//log.Printf("[+] %d loop - EIP 0x%x", p.iterationCount, ptrace.GetEIP(p.targetPid))
 		// exit bp hit
 		if wstat.StopSignal() == 5 {
 			eip := ptrace.GetEIP(p.targetPid)
-			log.Printf("BP, EIP 0x%x", eip)
+			//log.Printf("BP, EIP 0x%x", eip)
 			if uintptr(eip-1) == p.exitAddr {
-				log.Printf("Exit BP hit, restoring p.snapshot!")
+				//log.Printf("Exit BP hit, restoring p.snapshot!")
 				p.snapshot.RestoreSnapshot()
 				p.mutateInput()
-				loopCount++
+				p.iterationCount++
 			} else {
 				log.Printf("Unknown breakpoint!")
 				break
