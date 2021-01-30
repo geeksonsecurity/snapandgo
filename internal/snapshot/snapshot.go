@@ -59,7 +59,7 @@ type Manager struct {
 
 // TakeSnapshot takes a memory snapshot of all writable memory region for given pid
 func (p *Manager) TakeSnapshot() {
-	log.Printf("Taking snapshot of PID %d", p.Pid)
+	log.Printf("Taking snapshot of PID %d | EIP: 0x%x", p.Pid, ptrace.GetEIP(p.Pid))
 	mapsfile, err := os.Open(fmt.Sprintf("/proc/%d/maps", p.Pid))
 	if err != nil {
 		log.Fatal(err)

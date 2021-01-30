@@ -89,26 +89,32 @@ func (p *Fuzzer) Init(target string, breakpointsPath string) {
 // Fuzz Start fuzzing task
 func (p *Fuzzer) Fuzz() {
 	p.mainAddr = uintptr(p.Base + 0x2f4)
-	p.exitAddr = uintptr(p.Base + 0x39c)
+	p.exitAddr = uintptr(p.Base + 0x33b)
 
 	// waiting stop at entrypoint
 	var wstat syscall.WaitStatus
 	syscall.Wait4(p.targetPid, &wstat, 0, nil)
+	log.Printf("Trapped at beginning of traced process @ 0x%x", ptrace.GetEIP(p.targetPid))
 
 	originalMainByte := ptrace.Read(p.targetPid, p.mainAddr, 1)
 
 	// Replace main/exit with software breakpoint 0xCC
 	ptrace.Write(p.targetPid, p.mainAddr, []byte{0xCC})
-	ptrace.Write(p.targetPid, p.exitAddr, []byte{0xCC})
 	syscall.PtraceCont(p.targetPid, 0)
 
 	log.Println("Waiting to reach main() breakpoint..")
 	syscall.Wait4(p.targetPid, &wstat, 0, nil)
 	if wstat.StopSignal() == 5 {
+		eip := ptrace.GetEIP(p.targetPid)
+		if eip-1 != uint64(p.mainAddr) {
+			log.Fatalf("We didnt stop in main but at 0x%x", eip-1)
+		}
 		// revert main breakpoint
 		ptrace.Write(p.targetPid, p.mainAddr, originalMainByte)
 		// rewind EIP
 		p.snapshot.RewindEIP()
+		// set exit breakpoint
+		ptrace.Write(p.targetPid, p.exitAddr, []byte{0xCC})
 		// Snapshot!
 		p.snapshot.TakeSnapshot()
 		// locate payload
@@ -118,8 +124,6 @@ func (p *Fuzzer) Fuzz() {
 		} else {
 			log.Printf("Initial payload '%s' located at 0x%x", p.initialPayload, p.payloadPtr)
 		}
-		// continue
-		syscall.PtraceCont(p.targetPid, 0)
 	} else {
 		log.Fatalf("We expected main to be found: %s", utils.ExplainWaitStatus(wstat))
 	}
@@ -131,12 +135,13 @@ func (p *Fuzzer) Fuzz() {
 		if p.iterationCount%50 == 0 {
 			p.printStats()
 		}
+		syscall.PtraceCont(p.targetPid, 0)
 		syscall.Wait4(p.targetPid, &wstat, 0, nil)
-		//log.Printf("[+] %d loop - EIP 0x%x", p.iterationCount, ptrace.GetEIP(p.targetPid))
-		// exit bp hit
+
+		// Breakpoint hit!
 		if wstat.StopSignal() == 5 {
 			eip := ptrace.GetEIP(p.targetPid)
-			//log.Printf("BP, EIP 0x%x", eip)
+			// Is exit breakpoint? Rewind!
 			if uintptr(eip-1) == p.exitAddr {
 				//log.Printf("Exit BP hit, restoring p.snapshot!")
 				p.snapshot.RestoreSnapshot()
@@ -151,6 +156,5 @@ func (p *Fuzzer) Fuzz() {
 			log.Printf("INTERRUPTED! Reason: %s", utils.ExplainWaitStatus(wstat))
 			break
 		}
-		syscall.PtraceCont(p.targetPid, 0)
 	}
 }
