@@ -10,6 +10,7 @@ func Read(pid int, addr uintptr, count uint64) []byte {
 	dword := make([]byte, count)
 	_, err := syscall.PtracePeekText(pid, addr, dword)
 	if err != nil {
+		log.Printf("Failed to read to pid %d", pid)
 		log.Fatal(err)
 	}
 	//log.Printf("Read %d bytes", readcount)
@@ -20,6 +21,7 @@ func Read(pid int, addr uintptr, count uint64) []byte {
 func Write(pid int, addr uintptr, bytes []byte) uint {
 	res, err := syscall.PtracePokeText(pid, addr, bytes)
 	if err != nil {
+		log.Printf("Failed to write to pid %d", pid)
 		log.Fatal(err)
 	}
 	return uint(res)
@@ -45,6 +47,7 @@ func SetEIP(pid int, newEIP uint64) uint64 {
 func SaveRegisters(pid int, regs *syscall.PtraceRegs) {
 	err := syscall.PtraceGetRegs(pid, regs)
 	if err != nil {
+		log.Printf("Failed to save registers for pid %d", pid)
 		log.Fatal(err)
 	}
 }
@@ -53,6 +56,7 @@ func SaveRegisters(pid int, regs *syscall.PtraceRegs) {
 func RestoreRegisters(pid int, regs *syscall.PtraceRegs) {
 	err := syscall.PtraceSetRegs(pid, regs)
 	if err != nil {
+		log.Printf("Failed to restore registers for pid %d", pid)
 		log.Fatal(err)
 	}
 }

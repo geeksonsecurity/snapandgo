@@ -103,6 +103,7 @@ func (p *Manager) TakeSnapshot() {
 
 // RestoreSnapshot restore writable pages in the target process
 func (p *Manager) RestoreSnapshot() {
+	//TODO: we should use process_vm_writev here (ProcessVMWritev)
 	//log.Printf("Restoring snapshot for PID %d", p.Pid)
 	for _, s := range p.writableSections {
 		//log.Printf("Restoring 0x%x-0x%x [%d bytes] - %s - %s", s.From, s.To, s.Size, s.Perms, s.Module)

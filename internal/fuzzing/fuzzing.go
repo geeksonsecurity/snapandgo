@@ -140,9 +140,10 @@ func (p *Fuzzer) Fuzz() {
 			if uintptr(eip-1) == p.exitAddr {
 				//log.Printf("Exit BP hit, restoring p.snapshot!")
 				p.snapshot.RestoreSnapshot()
-				p.mutateInput()
+				//p.mutateInput()
 				p.iterationCount++
 			} else {
+				log.Printf("BP, EIP 0x%x", ptrace.GetEIP(p.targetPid))
 				log.Printf("Unknown breakpoint!")
 				break
 			}
