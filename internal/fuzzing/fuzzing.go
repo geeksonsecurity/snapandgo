@@ -159,8 +159,6 @@ func (p *Fuzzer) Fuzz() {
 
 	p.loadInitialState()
 
-	originalMainByte := ptrace.Read(p.targetPid, uintptr(p.start), 1)
-
 	// Replace main/exit with software breakpoint 0xCC
 	ptrace.Write(p.targetPid, uintptr(p.start), []byte{0xCC})
 	syscall.PtraceCont(p.targetPid, 0)
@@ -173,7 +171,7 @@ func (p *Fuzzer) Fuzz() {
 			log.Fatalf("We didnt stop in main but at 0x%x", eip-1)
 		}
 		// revert main breakpoint
-		ptrace.Write(p.targetPid, uintptr(p.start), originalMainByte)
+		ptrace.Write(p.targetPid, uintptr(p.start), []byte{p.breakpoints[p.start]})
 		// rewind EIP
 		p.snapshot.RewindEIP()
 		//p.setDynamicBreakpoints()
