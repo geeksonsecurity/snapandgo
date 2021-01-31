@@ -42,6 +42,7 @@ func (p Permission) String() string {
 type MemorySection struct {
 	From    uint64
 	To      uint64
+	Offset  uint64
 	Module  string
 	Content []byte
 	Perms   Permission
@@ -57,9 +58,19 @@ type Manager struct {
 	registers        syscall.PtraceRegs
 }
 
-// TakeSnapshot takes a memory snapshot of all writable memory region for given pid
-func (p *Manager) TakeSnapshot() {
-	log.Printf("Taking snapshot of PID %d | EIP: 0x%x", p.Pid, ptrace.GetEIP(p.Pid))
+// GetXSections return executable sections
+func (p *Manager) GetXSections() []*MemorySection {
+	var xmems []*MemorySection
+	for _, s := range p.sections {
+		if s.Perms.Executable() {
+			xmems = append(xmems, s)
+		}
+	}
+	return xmems
+}
+
+// LoadMemoryMap load /proc/id/maps
+func (p *Manager) LoadMemoryMap() {
 	mapsfile, err := os.Open(fmt.Sprintf("/proc/%d/maps", p.Pid))
 	if err != nil {
 		log.Fatal(err)
@@ -75,6 +86,7 @@ func (p *Manager) TakeSnapshot() {
 		section.From, _ = strconv.ParseUint(addresses[0], 16, 0)
 		section.To, _ = strconv.ParseUint(addresses[1], 16, 0)
 		section.Perms = Permission{lineTokens[1]}
+		section.Offset, _ = strconv.ParseUint(lineTokens[2], 16, 0)
 		section.Module = lineTokens[5]
 		section.Size = section.To - section.From
 		p.sections = append(p.sections, &section)
@@ -86,6 +98,12 @@ func (p *Manager) TakeSnapshot() {
 	if err := scanner.Err(); err != nil {
 		log.Fatal(err)
 	}
+
+}
+
+// TakeSnapshot takes a memory snapshot of all writable memory region for given pid
+func (p *Manager) TakeSnapshot() {
+	log.Printf("Taking snapshot of PID %d | EIP: 0x%x", p.Pid, ptrace.GetEIP(p.Pid))
 
 	for _, s := range p.writableSections {
 		log.Printf("Reading 0x%x-0x%x [%d bytes] - %s - %s", s.From, s.To, s.Size, s.Perms, s.Module)

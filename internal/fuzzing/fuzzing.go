@@ -2,8 +2,11 @@ package fuzzing
 
 import (
 	"bufio"
+	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"regexp"
 	"runtime"
 	"snapandgo/internal/ptrace"
 	"snapandgo/internal/snapshot"
@@ -19,32 +22,92 @@ type Fuzzer struct {
 	Base uint64
 
 	snapshot       *snapshot.Manager
+	mainSection    *snapshot.MemorySection
+	start          uint64
+	end            uint64
+	target         string
 	targetPid      int
 	initialPayload string
-	breakpoints    []uint64
-	mainAddr       uintptr
-	exitAddr       uintptr
+	breakpoints    map[uint64]byte
 	payloadPtr     uint64
 	startTime      time.Time
 	iterationCount uint64
 }
 
-func (p *Fuzzer) loadBreakpoints(bpFile string) {
-	inFile, err := os.Open(bpFile)
+func (p *Fuzzer) resolveStartEndAddress(startFuncName string, endFuncName string) (uint64, uint64) {
+	startRaw, _ := exec.Command("bash", "-c", fmt.Sprintf("nm %s | grep %s | awk '{print $1}'", p.target, startFuncName)).Output()
+	endRaw, _ := exec.Command("bash", "-c", fmt.Sprintf("nm %s | grep %s | awk '{print $1}'", p.target, endFuncName)).Output()
+	start, _ := strconv.ParseUint(strings.TrimSpace(string(startRaw)), 16, 64)
+	end, _ := strconv.ParseUint(strings.TrimSpace(string(endRaw)), 16, 64)
+	return start, end
+}
+
+func (p *Fuzzer) loadInitialState() {
+
+	p.breakpoints = make(map[uint64]byte)
+	p.mainSection = nil
+
+	p.snapshot.LoadMemoryMap()
+
+	for _, s := range p.snapshot.GetXSections() {
+		log.Printf(">> %s", s.Module)
+		// remove dots to avoid relative paths not matching
+		if strings.Contains(s.Module, strings.ReplaceAll(p.target, ".", "")) {
+			log.Printf("Found main executable module 0x%x-0x%x [offset 0x%x]", s.From, s.To, s.Offset)
+			p.mainSection = s
+			break
+		}
+	}
+
+	if p.mainSection == nil {
+		log.Fatalf("Unable to locate main memory region for target '%s'", p.target)
+	}
+
+	p.start, p.end = p.resolveStartEndAddress("startf", "endf")
+	p.start = p.start - p.mainSection.Offset + p.mainSection.From
+	p.end = p.end - p.mainSection.Offset + p.mainSection.From
+	log.Printf("Located start @ 0x%x and end @ 0x%x", p.start, p.end)
+
+	outputRaw, err := exec.Command("objdump", "-d", "-j", ".text", p.target).Output()
+
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer inFile.Close()
 
-	scanner := bufio.NewScanner(inFile)
+	output := string(outputRaw)
 
-	for scanner.Scan() {
-		val, _ := strconv.ParseUint(strings.Replace(scanner.Text(), "0x", "", -1), 16, 64)
-		p.breakpoints = append(p.breakpoints, val)
-		//log.Printf("0x%x / %s", val, scanner.Text())
+	output = output[strings.Index(output, ".text:")+8:]
+	output = strings.ReplaceAll(output, "\n\n", "\n")
+	outscanner := bufio.NewScanner(strings.NewReader(output))
+
+	for outscanner.Scan() {
+		line := outscanner.Text()
+		if line == "" {
+			continue
+		}
+		if line[len(line)-1:] == ":" {
+			continue
+		}
+		r, _ := regexp.Compile("^\\s*([0-9a-f]+)")
+		match := r.FindString(line)
+		addr, _ := strconv.ParseUint(strings.TrimSpace(match), 16, 64)
+		addr = addr - p.mainSection.Offset + p.mainSection.From
+		p.breakpoints[addr] = ptrace.Read(p.targetPid, uintptr(addr), 1)[0]
+		//log.Printf("Loaded breakpoint @ %x", addr)
 	}
+	log.Printf("Loaded %d breakpoints!", len(p.breakpoints))
+	return
+}
 
-	log.Printf("Loaded %d breakpoints", len(p.breakpoints))
+func (p *Fuzzer) setDynamicBreakpoints() {
+	for addr := range p.breakpoints {
+		ptrace.Write(p.targetPid, uintptr(addr), []byte{0xCC})
+	}
+}
+
+func (p *Fuzzer) restoreDynamicBreakpoint(addr uint64) {
+	log.Printf("Restoring breakpoint @ 0x%x", addr)
+	ptrace.Write(p.targetPid, uintptr(addr), []byte{p.breakpoints[addr]})
 }
 
 func (p *Fuzzer) mutateInput() {
@@ -60,6 +123,7 @@ func (p *Fuzzer) printStats() {
 // Init the Fuzzer instance
 func (p *Fuzzer) Init(target string, breakpointsPath string) {
 
+	p.target = target
 	devNull := os.NewFile(0, os.DevNull)
 	//FIXME: why child keeps sending output to stdout?
 	procAttr := syscall.ProcAttr{
@@ -84,39 +148,37 @@ func (p *Fuzzer) Init(target string, breakpointsPath string) {
 	p.snapshot = &snapshot.Manager{
 		Pid: p.targetPid,
 	}
-	p.loadBreakpoints(breakpointsPath)
-
 }
 
 // Fuzz Start fuzzing task
 func (p *Fuzzer) Fuzz() {
-	p.mainAddr = uintptr(p.Base + 0x2f4)
-	p.exitAddr = uintptr(p.Base + 0x33b)
-
 	// waiting stop at entrypoint
 	var wstat syscall.WaitStatus
 	syscall.Wait4(p.targetPid, &wstat, 0, nil)
 	log.Printf("Trapped at beginning of traced process @ 0x%x", ptrace.GetEIP(p.targetPid))
 
-	originalMainByte := ptrace.Read(p.targetPid, p.mainAddr, 1)
+	p.loadInitialState()
+
+	originalMainByte := ptrace.Read(p.targetPid, uintptr(p.start), 1)
 
 	// Replace main/exit with software breakpoint 0xCC
-	ptrace.Write(p.targetPid, p.mainAddr, []byte{0xCC})
+	ptrace.Write(p.targetPid, uintptr(p.start), []byte{0xCC})
 	syscall.PtraceCont(p.targetPid, 0)
 
 	log.Println("Waiting to reach main() breakpoint..")
 	syscall.Wait4(p.targetPid, &wstat, 0, nil)
 	if wstat.StopSignal() == 5 {
 		eip := ptrace.GetEIP(p.targetPid)
-		if eip-1 != uint64(p.mainAddr) {
+		if eip-1 != p.start {
 			log.Fatalf("We didnt stop in main but at 0x%x", eip-1)
 		}
 		// revert main breakpoint
-		ptrace.Write(p.targetPid, p.mainAddr, originalMainByte)
+		ptrace.Write(p.targetPid, uintptr(p.start), originalMainByte)
 		// rewind EIP
 		p.snapshot.RewindEIP()
+		//p.setDynamicBreakpoints()
 		// set exit breakpoint
-		ptrace.Write(p.targetPid, p.exitAddr, []byte{0xCC})
+		ptrace.Write(p.targetPid, uintptr(p.end), []byte{0xCC})
 		// Snapshot!
 		p.snapshot.TakeSnapshot()
 		// locate payload
@@ -142,17 +204,16 @@ func (p *Fuzzer) Fuzz() {
 
 		// Breakpoint hit!
 		if wstat.StopSignal() == 5 {
-			eip := ptrace.GetEIP(p.targetPid)
+			eip := ptrace.GetEIP(p.targetPid) - 1
 			// Is exit breakpoint? Rewind!
-			if uintptr(eip-1) == p.exitAddr {
+			if uintptr(eip) == uintptr(p.end) {
 				//log.Printf("Exit BP hit, restoring p.snapshot!")
 				p.snapshot.RestoreSnapshot()
 				//p.mutateInput()
 				p.iterationCount++
 			} else {
-				log.Printf("BP, EIP 0x%x", ptrace.GetEIP(p.targetPid))
-				log.Printf("Unknown breakpoint!")
-				break
+				log.Printf("BP, EIP 0x%x", eip)
+				//p.restoreDynamicBreakpoint(eip)
 			}
 		} else {
 			log.Printf("INTERRUPTED! Reason: %s", utils.ExplainWaitStatus(wstat))
