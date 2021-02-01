@@ -102,12 +102,17 @@ func (p *Fuzzer) loadInitialState() {
 func (p *Fuzzer) setDynamicBreakpoints() {
 	for addr := range p.breakpoints {
 		ptrace.Write(p.targetPid, uintptr(addr), []byte{0xCC})
+		//log.Printf("Set bp 0x%x", addr)
 	}
 }
 
 func (p *Fuzzer) restoreDynamicBreakpoint(addr uint64) {
-	log.Printf("Restoring breakpoint @ 0x%x", addr)
-	ptrace.Write(p.targetPid, uintptr(addr), []byte{p.breakpoints[addr]})
+	res := ptrace.Write(p.targetPid, uintptr(addr), []byte{p.breakpoints[addr]})
+	if res != 1 {
+		log.Fatalf("Failed to revert bp @ 0x%x with value 0x%x", addr, p.breakpoints[addr])
+	}
+	ptrace.SetEIP(p.targetPid, addr)
+	//log.Printf("Reverting bp @ 0x%x with value 0x%x", addr, p.breakpoints[addr])
 }
 
 func (p *Fuzzer) mutateInput() {
@@ -117,7 +122,14 @@ func (p *Fuzzer) mutateInput() {
 
 func (p *Fuzzer) printStats() {
 	elapsed := time.Since(p.startTime)
-	log.Printf("[%10.4f] cases %.10d | fcps %8.4f", elapsed.Seconds(), p.iterationCount, float64(p.iterationCount)/elapsed.Seconds())
+	found := 0
+	for _, v := range p.breakpoints {
+		if v == 0 {
+			found++
+		}
+	}
+
+	log.Printf("[%10.4f] cases %10d | fcps %8.4f | cov %2.1f%% (hit: %3d, tot: %3d)", elapsed.Seconds(), p.iterationCount, float64(p.iterationCount)/elapsed.Seconds(), float64(found)/float64(len(p.breakpoints))*100.0, found, len(p.breakpoints))
 }
 
 // Init the Fuzzer instance
@@ -161,22 +173,20 @@ func (p *Fuzzer) Fuzz() {
 
 	// Replace main/exit with software breakpoint 0xCC
 	ptrace.Write(p.targetPid, uintptr(p.start), []byte{0xCC})
+
 	syscall.PtraceCont(p.targetPid, 0)
 
-	log.Println("Waiting to reach main() breakpoint..")
+	log.Printf("Waiting to reach startf() @ 0x%x breakpoint..", p.start)
 	syscall.Wait4(p.targetPid, &wstat, 0, nil)
 	if wstat.StopSignal() == 5 {
-		eip := ptrace.GetEIP(p.targetPid)
-		if eip-1 != p.start {
-			log.Fatalf("We didnt stop in main but at 0x%x", eip-1)
+		eip := ptrace.GetEIP(p.targetPid) - 1
+		if eip != p.start {
+			log.Fatalf("We didnt stop in main but at 0x%x", eip)
 		}
 		// revert main breakpoint
-		ptrace.Write(p.targetPid, uintptr(p.start), []byte{p.breakpoints[p.start]})
-		// rewind EIP
-		p.snapshot.RewindEIP()
-		//p.setDynamicBreakpoints()
-		// set exit breakpoint
-		ptrace.Write(p.targetPid, uintptr(p.end), []byte{0xCC})
+		p.restoreDynamicBreakpoint(p.start)
+		// set all breakpoints
+		p.setDynamicBreakpoints()
 		// Snapshot!
 		p.snapshot.TakeSnapshot()
 		// locate payload
@@ -194,7 +204,7 @@ func (p *Fuzzer) Fuzz() {
 	p.startTime = time.Now()
 	log.Printf("Entering main fuzzing loop...")
 	for {
-		if p.iterationCount%50 == 0 {
+		if p.iterationCount%100 == 0 {
 			p.printStats()
 		}
 		syscall.PtraceCont(p.targetPid, 0)
@@ -205,13 +215,14 @@ func (p *Fuzzer) Fuzz() {
 			eip := ptrace.GetEIP(p.targetPid) - 1
 			// Is exit breakpoint? Rewind!
 			if uintptr(eip) == uintptr(p.end) {
-				//log.Printf("Exit BP hit, restoring p.snapshot!")
+				//log.Printf("Exit @ 0x%x BP hit, restoring snapshot!", eip)
 				p.snapshot.RestoreSnapshot()
 				//p.mutateInput()
 				p.iterationCount++
 			} else {
-				log.Printf("BP, EIP 0x%x", eip)
-				//p.restoreDynamicBreakpoint(eip)
+				//log.Printf("BP, EIP 0x%x", eip)
+				p.restoreDynamicBreakpoint(eip)
+				p.breakpoints[eip] = 0
 			}
 		} else {
 			log.Printf("INTERRUPTED! Reason: %s", utils.ExplainWaitStatus(wstat))
