@@ -7,11 +7,16 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"snapandgo/internal/ptrace"
 	"strconv"
 	"strings"
 	"syscall"
 
-	"snapandgo/internal/ptrace"
+	// #include <stdio.h>
+	// #include <stdlib.h>
+	"C"
+
+	"golang.org/x/sys/unix"
 )
 
 // Permission representation
@@ -124,8 +129,28 @@ func (p *Manager) RestoreSnapshot() {
 	//TODO: we should use process_vm_writev here (ProcessVMWritev)
 	//log.Printf("Restoring snapshot for PID %d", p.Pid)
 	for _, s := range p.writableSections {
+
+		//data := []byte{0x1, 0x1, 0x1, 0x1, 0x1, 0x1, 0x1}
+		//log.Printf("Restoring 0x%x-0x%x [%d bytes | backing %p] - %s - %s", s.From, s.To, len(s.Content), &s.Content[0], s.Perms, s.Module)
+
+		localIovec := unix.Iovec{Base: &s.Content[0], Len: uint64(len(s.Content))}
+		remoteIovec := unix.RemoteIovec{Base: uintptr(s.From), Len: len(s.Content)}
+
+		var localIovecs []unix.Iovec
+		var remoteIovecs []unix.RemoteIovec
+		localIovecs = append(localIovecs, localIovec)
+		remoteIovecs = append(remoteIovecs, remoteIovec)
+
+		//log.Printf("Almost ready to restore process %d", p.Pid)
+		//bufio.NewReader(os.Stdin).ReadBytes('\n')
+
+		written, err := unix.ProcessVMWritev(p.Pid, localIovecs, remoteIovecs, 0)
+		if err != nil {
+			log.Fatal(err)
+		}
+
 		//log.Printf("Restoring 0x%x-0x%x [%d bytes] - %s - %s", s.From, s.To, s.Size, s.Perms, s.Module)
-		written := ptrace.Write(p.Pid, uintptr(s.From), s.Content)
+		//written := ptrace.Write(p.Pid, uintptr(s.From), s.Content)
 		if uint64(written) != s.Size {
 			log.Panicf("Failed to write all %d bytes to target process, wrote %d only!", s.Size, written)
 		}

@@ -42,6 +42,12 @@ func (p *Fuzzer) resolveStartEndAddress(startFuncName string, endFuncName string
 	return start, end
 }
 
+func (p *Fuzzer) getEntrypoint() uint64 {
+	startRaw, _ := exec.Command("bash", "-c", fmt.Sprintf("nm %s | grep -sw _start | awk '{print $1}'", p.target)).Output()
+	start, _ := strconv.ParseUint(strings.TrimSpace(string(startRaw)), 16, 64)
+	return start
+}
+
 func (p *Fuzzer) loadInitialState() {
 
 	p.breakpoints = make(map[uint64]byte)
@@ -50,7 +56,7 @@ func (p *Fuzzer) loadInitialState() {
 	p.snapshot.LoadMemoryMap()
 
 	for _, s := range p.snapshot.GetXSections() {
-		log.Printf(">> %s", s.Module)
+		//log.Printf(">> %s", s.Module)
 		// remove dots to avoid relative paths not matching
 		if strings.Contains(s.Module, strings.ReplaceAll(p.target, ".", "")) {
 			log.Printf("Found main executable module 0x%x-0x%x [offset 0x%x]", s.From, s.To, s.Offset)
@@ -166,23 +172,51 @@ func (p *Fuzzer) Init(target string, breakpointsPath string) {
 func (p *Fuzzer) Fuzz() {
 	// waiting stop at entrypoint
 	var wstat syscall.WaitStatus
+	var eip uint64
 	syscall.Wait4(p.targetPid, &wstat, 0, nil)
 	log.Printf("Trapped at beginning of traced process @ 0x%x", ptrace.GetEIP(p.targetPid))
 
+	//TODO: Cleanup the next section
+	//Apparently with ptrace we land before the loader finishes its job (_start@ld-linux )
+	//This causes the memory map to change till the real binary entrypoint is hit (_start@target symbol)
+	//To correctly read the memory segments we therefore need to postpone initial loading until the target entrypoint!
+	// The offsets are hardcoded since those were calculated in loadInitialState, need refactoring!
+	entrypoint := p.getEntrypoint() - 0x1000 + 0x0000555555555000
+	orig := ptrace.Read(p.targetPid, uintptr(entrypoint), 1)
+	log.Printf("Breaking on binary entrypoint _start @ 0x%x", entrypoint)
+	ptrace.Write(p.targetPid, uintptr(entrypoint), []byte{0xCC})
+	syscall.PtraceCont(p.targetPid, 0)
+
+	// We hit the breakpoint
+	syscall.Wait4(p.targetPid, &wstat, 0, nil)
+	eip = ptrace.GetEIP(p.targetPid) - 1
+	if wstat.StopSignal() != 5 {
+		log.Fatal("Unable to hit _start!")
+	} else if eip != entrypoint {
+		log.Fatalf("We couldnt stop at _start, but we landed @ 0x%x", eip)
+	} else {
+		log.Printf("We landed at _start")
+	}
+
+	ptrace.Write(p.targetPid, uintptr(entrypoint), []byte{orig[0]})
+	ptrace.SetEIP(p.targetPid, entrypoint)
+
 	p.loadInitialState()
+	//TODO-END
 
 	// Replace main/exit with software breakpoint 0xCC
 	ptrace.Write(p.targetPid, uintptr(p.start), []byte{0xCC})
-
 	syscall.PtraceCont(p.targetPid, 0)
 
 	log.Printf("Waiting to reach startf() @ 0x%x breakpoint..", p.start)
 	syscall.Wait4(p.targetPid, &wstat, 0, nil)
 	if wstat.StopSignal() == 5 {
-		eip := ptrace.GetEIP(p.targetPid) - 1
+
+		eip = ptrace.GetEIP(p.targetPid) - 1
 		if eip != p.start {
 			log.Fatalf("We didnt stop in main but at 0x%x", eip)
 		}
+
 		// revert main breakpoint
 		p.restoreDynamicBreakpoint(p.start)
 		// set all breakpoints
@@ -204,7 +238,7 @@ func (p *Fuzzer) Fuzz() {
 	p.startTime = time.Now()
 	log.Printf("Entering main fuzzing loop...")
 	for {
-		if p.iterationCount%100 == 0 {
+		if p.iterationCount%30000 == 0 {
 			p.printStats()
 		}
 		syscall.PtraceCont(p.targetPid, 0)
