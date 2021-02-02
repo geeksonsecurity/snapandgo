@@ -69,7 +69,7 @@ func (p *Mutation) Mutate() ([]byte) {
 		tc, _ = p.genBytes(1)
 	}
         // mutate
-    	t := rand.Intn(3)
+    	t := rand.Intn(4)
     	switch t {
     		case 0: // append 1 random byte
 			//fmt.Println("Mutation type: append")
@@ -81,6 +81,8 @@ func (p *Mutation) Mutate() ([]byte) {
     		case 2: // remove 1 byte
 			//fmt.Println("Mutation type: remove")
 			tc = bytes.TrimPrefix(tc, []byte{tc[rand.Intn(len(tc))]})
+    		case 3: // random
+			tc, _ = p.genBytes(uint64(rand.Intn(16)))
     	}
 
 	p.testcase = tc
