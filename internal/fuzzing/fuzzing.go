@@ -2,8 +2,10 @@ package fuzzing
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/exec"
 	"regexp"
@@ -15,78 +17,80 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"math/rand"
-	"bytes"
 )
 
-//dumb mutation stuff
+//Mutation handle simple mutation strategy
 type Mutation struct {
-        corpus map[uint64][]byte
-	testcase []byte
+	corpus [][]byte
+	empty  []byte
+	c      int
 }
 
-func (p *Mutation) genBytes(n uint64) ([]byte, error) {
-	src := rand.NewSource(time.Now().UnixNano())
-	rnd := rand.New(src)
-
-        buf := make([]byte, n)
-        _, err := rnd.Read(buf)
-
-        if err != nil {
-                return nil, err
-        }
-        return buf, nil
+func (p *Mutation) clone(input []byte) []byte {
+	newbuff := make([]byte, len(input))
+	copy(newbuff, input)
+	return newbuff
 }
-
 func (p *Mutation) storeCorpus(c []byte) {
 	for _, x := range p.corpus {
+		// compare on array with 0x0 values will stop comparing on first null (e.g. []{ 0x0, 0x0, 0x0 } == []{ 0x0, 0x0 })
 		if bytes.Compare(x, c) == 0 {
 			return
 		}
 	}
-	p.corpus[uint64(len(p.corpus) + 1)] = c
+	log.Printf("New corpus: '%s'", bytes.Trim(c, "\n\t"))
+	p.corpus = append(p.corpus, p.clone(c))
 }
 
-func (p *Mutation) pickCorpus() ([]byte) {
-	return p.corpus[uint64(rand.Int63n(int64(len(p.corpus))))]
-}
-
-func (p *Mutation) Init() {
-	p.corpus   = make(map[uint64][]byte)
-        buf, err := p.genBytes(1)
-        if err != nil {
-                p.corpus[0] = []byte{0x41}
-        } else {
-                p.corpus[0] = buf
-        }
-        return
-}
-
-func (p *Mutation) Mutate() ([]byte) {
-        // get a corpus and mutate it
-        tc := p.pickCorpus()
-	if len(tc) == 0 {
-		tc, _ = p.genBytes(1)
+func (p *Mutation) pickCorpus() []byte {
+	if len(p.corpus) == 0 {
+		return p.empty
 	}
-        // mutate
-    	t := rand.Intn(4)
-    	switch t {
-    		case 0: // append 1 random byte
+	idx := rand.Int() % len(p.corpus)
+	// If we dont clone here a reference is passed and the value inside the p.corpus array is modified! (in-place)
+	return p.clone(p.corpus[idx])
+}
+
+// Init initialize corpus and default value
+func (p *Mutation) Init() {
+	p.empty = []byte{0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf, 0x0}
+	p.corpus = make([][]byte, 0)
+	log.Printf("Corpus initialized %d items", len(p.corpus))
+}
+
+// Mutate return a mutation from a randomly selected item from the input queue
+func (p *Mutation) Mutate() []byte {
+	// get a corpus and mutate it
+	tc := p.pickCorpus()
+
+	index0 := rand.Intn(len(tc) - 1)
+	byte0 := byte(rand.Uint32() % 256)
+	index1 := rand.Intn(len(tc) - 1)
+	byte1 := byte(rand.Uint32() % 256)
+
+	tc[index0] = byte0
+	tc[index1] = byte1
+
+	//log.Printf("Mutation '%s'", hex.Dump(tc))
+
+	// mutate
+	/*
+		t := rand.Intn(4)
+		switch t {
+		case 0: // append 1 random byte
 			//fmt.Println("Mutation type: append")
 			rb := rand.Intn(256)
 			tc = append(tc, byte(rb))
-     		case 1: // flip bytes
+		case 1: // flip bytes
 			//fmt.Println("Mutation type: flip")
 			tc = bytes.Replace(tc, []byte{tc[rand.Intn(len(tc))]}, []byte{tc[rand.Intn(len(tc))]}, 1)
-    		case 2: // remove 1 byte
+		case 2: // remove 1 byte
 			//fmt.Println("Mutation type: remove")
 			tc = bytes.TrimPrefix(tc, []byte{tc[rand.Intn(len(tc))]})
-    		case 3: // random
+		case 3: // random
 			tc, _ = p.genBytes(uint64(rand.Intn(16)))
-    	}
-
-	p.testcase = tc
-        return tc
+		}*/
+	return tc
 }
 
 // Fuzzer handle the fuzzing stuff
@@ -194,20 +198,12 @@ func (p *Fuzzer) restoreDynamicBreakpoint(addr uint64) {
 	ptrace.SetEIP(p.targetPid, addr)
 	//log.Printf("Reverting bp @ 0x%x with value 0x%x", addr, p.breakpoints[addr])
 }
-
-func (p *Fuzzer) mutateInput() {
+func (p *Fuzzer) mutateInput() []byte {
 	// override input param
 	newPayload := p.mutationEngine.Mutate()
-/*
-	for _, n := range(newPayload) {
-        	fmt.Printf("% 08b", n)
-    	}
-	fmt.Println()
-	fmt.Println(newPayload)
-*/
-	//ptrace.Write(p.targetPid, uintptr(p.payloadPtr), []byte{0x41, 0x42, 0x43, 0x44, 0x0})
 	// add null terminator
 	ptrace.Write(p.targetPid, uintptr(p.payloadPtr), append(newPayload, 0x0))
+	return newPayload
 }
 
 func (p *Fuzzer) printStats() {
@@ -323,6 +319,7 @@ func (p *Fuzzer) Fuzz() {
 
 	p.iterationCount = 0
 	p.startTime = time.Now()
+	currentPayload := p.mutateInput()
 	log.Printf("Entering main fuzzing loop...")
 	for {
 		if p.iterationCount%30000 == 0 {
@@ -338,13 +335,13 @@ func (p *Fuzzer) Fuzz() {
 			if uintptr(eip) == uintptr(p.end) {
 				//log.Printf("Exit @ 0x%x BP hit, restoring snapshot!", eip)
 				p.snapshot.RestoreSnapshot()
-				p.mutateInput()
+				currentPayload = p.mutateInput()
 				p.iterationCount++
 			} else {
 				//log.Printf("BP, EIP 0x%x", eip)
 				p.restoreDynamicBreakpoint(eip)
 				p.breakpoints[eip] = 0
-				p.mutationEngine.storeCorpus(p.mutationEngine.testcase)
+				p.mutationEngine.storeCorpus(currentPayload)
 			}
 		} else {
 			log.Printf("INTERRUPTED! Reason: %s", utils.ExplainWaitStatus(wstat))
