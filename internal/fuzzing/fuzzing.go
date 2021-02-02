@@ -15,7 +15,77 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"math/rand"
+	"bytes"
 )
+
+//dumb mutation stuff
+type Mutation struct {
+        corpus map[uint64][]byte
+	testcase []byte
+}
+
+func (p *Mutation) genBytes(n uint64) ([]byte, error) {
+	src := rand.NewSource(time.Now().UnixNano())
+	rnd := rand.New(src)
+
+        buf := make([]byte, n)
+        _, err := rnd.Read(buf)
+
+        if err != nil {
+                return nil, err
+        }
+        return buf, nil
+}
+
+func (p *Mutation) storeCorpus(c []byte) {
+	for _, x := range p.corpus {
+		if bytes.Compare(x, c) == 0 {
+			return
+		}
+	}
+	p.corpus[uint64(len(p.corpus) + 1)] = c
+}
+
+func (p *Mutation) pickCorpus() ([]byte) {
+	return p.corpus[uint64(rand.Int63n(int64(len(p.corpus))))]
+}
+
+func (p *Mutation) Init() {
+	p.corpus   = make(map[uint64][]byte)
+        buf, err := p.genBytes(1)
+        if err != nil {
+                p.corpus[0] = []byte{0x41}
+        } else {
+                p.corpus[0] = buf
+        }
+        return
+}
+
+func (p *Mutation) Mutate() ([]byte) {
+        // get a corpus and mutate it
+        tc := p.pickCorpus()
+	if len(tc) == 0 {
+		tc, _ = p.genBytes(1)
+	}
+        // mutate
+    	t := rand.Intn(3)
+    	switch t {
+    		case 0: // append 1 random byte
+			//fmt.Println("Mutation type: append")
+			rb := rand.Intn(256)
+			tc = append(tc, byte(rb))
+     		case 1: // flip bytes
+			//fmt.Println("Mutation type: flip")
+			tc = bytes.Replace(tc, []byte{tc[rand.Intn(len(tc))]}, []byte{tc[rand.Intn(len(tc))]}, 1)
+    		case 2: // remove 1 byte
+			//fmt.Println("Mutation type: remove")
+			tc = bytes.TrimPrefix(tc, []byte{tc[rand.Intn(len(tc))]})
+    	}
+
+	p.testcase = tc
+        return tc
+}
 
 // Fuzzer handle the fuzzing stuff
 type Fuzzer struct {
@@ -23,6 +93,8 @@ type Fuzzer struct {
 
 	snapshot       *snapshot.Manager
 	mainSection    *snapshot.MemorySection
+	mutationEngine *Mutation
+
 	start          uint64
 	end            uint64
 	target         string
@@ -123,7 +195,17 @@ func (p *Fuzzer) restoreDynamicBreakpoint(addr uint64) {
 
 func (p *Fuzzer) mutateInput() {
 	// override input param
-	ptrace.Write(p.targetPid, uintptr(p.payloadPtr), []byte{0x41, 0x42, 0x43, 0x44, 0x0})
+	newPayload := p.mutationEngine.Mutate()
+/*
+	for _, n := range(newPayload) {
+        	fmt.Printf("% 08b", n)
+    	}
+	fmt.Println()
+	fmt.Println(newPayload)
+*/
+	//ptrace.Write(p.targetPid, uintptr(p.payloadPtr), []byte{0x41, 0x42, 0x43, 0x44, 0x0})
+	// add null terminator
+	ptrace.Write(p.targetPid, uintptr(p.payloadPtr), append(newPayload, 0x0))
 }
 
 func (p *Fuzzer) printStats() {
@@ -135,7 +217,7 @@ func (p *Fuzzer) printStats() {
 		}
 	}
 
-	log.Printf("[%10.4f] cases %10d | fcps %8.4f | cov %2.1f%% (hit: %3d, tot: %3d)", elapsed.Seconds(), p.iterationCount, float64(p.iterationCount)/elapsed.Seconds(), float64(found)/float64(len(p.breakpoints))*100.0, found, len(p.breakpoints))
+	log.Printf("[%10.4f] cases %10d | fcps %8.4f | cov %2.1f%% (hit: %3d, tot: %3d) | corpus: %d", elapsed.Seconds(), p.iterationCount, float64(p.iterationCount)/elapsed.Seconds(), float64(found)/float64(len(p.breakpoints))*100.0, found, len(p.breakpoints), len(p.mutationEngine.corpus))
 }
 
 // Init the Fuzzer instance
@@ -166,6 +248,9 @@ func (p *Fuzzer) Init(target string, breakpointsPath string) {
 	p.snapshot = &snapshot.Manager{
 		Pid: p.targetPid,
 	}
+
+	p.mutationEngine = &Mutation{}
+	p.mutationEngine.Init()
 }
 
 // Fuzz Start fuzzing task
@@ -251,12 +336,13 @@ func (p *Fuzzer) Fuzz() {
 			if uintptr(eip) == uintptr(p.end) {
 				//log.Printf("Exit @ 0x%x BP hit, restoring snapshot!", eip)
 				p.snapshot.RestoreSnapshot()
-				//p.mutateInput()
+				p.mutateInput()
 				p.iterationCount++
 			} else {
 				//log.Printf("BP, EIP 0x%x", eip)
 				p.restoreDynamicBreakpoint(eip)
 				p.breakpoints[eip] = 0
+				p.mutationEngine.storeCorpus(p.mutationEngine.testcase)
 			}
 		} else {
 			log.Printf("INTERRUPTED! Reason: %s", utils.ExplainWaitStatus(wstat))
