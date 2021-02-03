@@ -18,15 +18,16 @@ func (m *Mutation) clone(input []byte) []byte {
 	copy(newbuff, input)
 	return newbuff
 }
-func (m *Mutation) storeCorpus(c []byte) {
+func (m *Mutation) storeCorpus(c []byte) bool {
 	for _, x := range m.corpus {
 		// compare on array with 0x0 values will stop comparing on first null (e.g. []{ 0x0, 0x0, 0x0 } == []{ 0x0, 0x0 })
 		if bytes.Compare(x, c) == 0 {
-			return
+			return false
 		}
 	}
 	log.Printf("New corpus: '%s'", bytes.Trim(c, "\n\t"))
 	m.corpus = append(m.corpus, m.clone(c))
+	return true
 }
 
 func (m *Mutation) pickCorpus() []byte {

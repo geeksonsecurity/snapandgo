@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 )
 
 // Fuzzer handle the fuzzing stuff
@@ -22,6 +21,7 @@ type Fuzzer struct {
 
 	snapshot       *snapshot.Manager
 	mutationEngine *Mutation
+	stats          *Stats
 
 	start          uint64
 	end            uint64
@@ -30,12 +30,15 @@ type Fuzzer struct {
 	initialPayload string
 	breakpoints    map[uint64]byte
 	payloadPtr     uint64
-	startTime      time.Time
-	iterationCount uint64
+	currentInput   []byte
+	crashes        []uint64
 }
 
 func (f *Fuzzer) loadInitialState() {
 
+	f.stats = &Stats{
+		IterationCount: 0,
+	}
 	f.breakpoints = make(map[uint64]byte)
 	f.start = f.snapshot.ResolveAddress("startf")
 	f.end = f.snapshot.ResolveAddress("endf")
@@ -68,6 +71,7 @@ func (f *Fuzzer) loadInitialState() {
 		//log.Printf("Loaded breakpoint @ %x", addr)
 	}
 	log.Printf("Loaded %d breakpoints!", len(f.breakpoints))
+	f.stats.TotalBreakpoints = len(f.breakpoints)
 	return
 }
 
@@ -86,24 +90,11 @@ func (f *Fuzzer) restoreDynamicBreakpoint(addr uint64) {
 	ptrace.SetEIP(f.targetPid, addr)
 	//log.Printf("Reverting bp @ 0x%x with value 0x%x", addr, f.breakpoints[addr])
 }
-func (f *Fuzzer) mutateInput() []byte {
+func (f *Fuzzer) mutateInput() {
 	// override input param
-	newPayload := f.mutationEngine.Mutate()
+	f.currentInput = f.mutationEngine.Mutate()
 	// add null terminator
-	ptrace.Write(f.targetPid, uintptr(f.payloadPtr), append(newPayload, 0x0))
-	return newPayload
-}
-
-func (f *Fuzzer) printStats() {
-	elapsed := time.Since(f.startTime)
-	found := 0
-	for _, v := range f.breakpoints {
-		if v == 0 {
-			found++
-		}
-	}
-
-	log.Printf("[%10.4f] cases %10d | fcps %8.4f | cov %2.1f%% (hit: %3d, tot: %3d) | corpus: %d", elapsed.Seconds(), f.iterationCount, float64(f.iterationCount)/elapsed.Seconds(), float64(found)/float64(len(f.breakpoints))*100.0, found, len(f.breakpoints), len(f.mutationEngine.corpus))
+	ptrace.Write(f.targetPid, uintptr(f.payloadPtr), append(f.currentInput, 0x0))
 }
 
 // Init the Fuzzer instance
@@ -140,6 +131,16 @@ func (f *Fuzzer) Init(target string, breakpointsPath string) {
 	f.mutationEngine.Init()
 }
 
+func (f *Fuzzer) countFoundBreakpoints() int {
+	found := 0
+	for _, v := range f.breakpoints {
+		if v == 0 {
+			found++
+		}
+	}
+	return found
+}
+
 func (f *Fuzzer) waitForBreakpoint(addr uint64) {
 	var wstat syscall.WaitStatus
 	orig := ptrace.Read(f.targetPid, uintptr(addr), 1)
@@ -160,6 +161,21 @@ func (f *Fuzzer) waitForBreakpoint(addr uint64) {
 	ptrace.SetEIP(f.targetPid, addr)
 }
 
+func (f *Fuzzer) isNewCrash(eip uint64) bool {
+	for _, v := range f.crashes {
+		if v == eip {
+			return false
+		}
+	}
+	return true
+}
+
+func (f *Fuzzer) restore() {
+	f.snapshot.RestoreSnapshot()
+	f.mutateInput()
+	f.stats.IterationCount++
+}
+
 // Fuzz Start fuzzing task
 func (f *Fuzzer) Fuzz() {
 	// waiting stop at entrypoint
@@ -169,7 +185,7 @@ func (f *Fuzzer) Fuzz() {
 
 	//Apparently with ptrace we land before the loader finishes its job (_start@ld-linux )
 	//This causes the memory map to change till the real binary entrypoint is hit (_start@target symbol)
-	//To correctly read the memory segments we therefore need to postpone initial loading until the target entrypoint!
+	//To correctly read the memory segments we therefore need to force a reload when we are at the main target entrypoint!
 	entrypoint := f.snapshot.GetEntrypoint()
 	log.Printf("Breaking on main binary entrypoint _start 0x%x", entrypoint)
 	f.waitForBreakpoint(entrypoint)
@@ -190,14 +206,11 @@ func (f *Fuzzer) Fuzz() {
 		log.Printf("Initial payload '%s' located at 0x%x", f.initialPayload, f.payloadPtr)
 	}
 
-	f.iterationCount = 0
-	f.startTime = time.Now()
-	currentPayload := f.mutateInput()
+	f.mutateInput()
+	go f.stats.StatsMonitor()
+
 	log.Printf("Entering main fuzzing loop...")
 	for {
-		if f.iterationCount%30000 == 0 {
-			f.printStats()
-		}
 		syscall.PtraceCont(f.targetPid, 0)
 		syscall.Wait4(f.targetPid, &wstat, 0, nil)
 
@@ -207,15 +220,24 @@ func (f *Fuzzer) Fuzz() {
 			// Is exit breakpoint? Rewind!
 			if uintptr(eip) == uintptr(f.end) {
 				//log.Printf("Exit @ 0x%x BP hit, restoring snapshot!", eip)
-				f.snapshot.RestoreSnapshot()
-				currentPayload = f.mutateInput()
-				f.iterationCount++
+				f.restore()
 			} else {
 				//log.Printf("BP, EIP 0x%x", eip)
 				f.restoreDynamicBreakpoint(eip)
 				f.breakpoints[eip] = 0
-				f.mutationEngine.storeCorpus(currentPayload)
+				added := f.mutationEngine.storeCorpus(f.currentInput)
+				if added {
+					f.stats.CorpusLength = len(f.mutationEngine.corpus)
+					f.stats.FoundBreakpoints = f.countFoundBreakpoints()
+				}
 			}
+		} else if wstat.StopSignal() == 11 {
+			eip := ptrace.GetEIP(f.targetPid)
+			if f.isNewCrash(eip) {
+				f.crashes = append(f.crashes, eip)
+				f.stats.Crashes++
+			}
+			f.restore()
 		} else {
 			log.Printf("INTERRUPTED! Reason: %s", utils.ExplainWaitStatus(wstat))
 			break
