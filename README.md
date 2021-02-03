@@ -5,12 +5,13 @@ Its written in Golang and does not use any external dependency.
 
 > This is still in development, so don't expect anything to work rn
 
-## Build
+## Build & Run
 
 To build the demo program:
 ```
 cd tools/demo
 make
+go run cmd/snapandgo/main.go
 ```
 
 [![asciicast](https://asciinema.org/a/oaRdpYrOorg9QKIWoV86AhVmv.svg)](https://asciinema.org/a/oaRdpYrOorg9QKIWoV86AhVmv)
