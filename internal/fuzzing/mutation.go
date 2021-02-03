@@ -25,7 +25,17 @@ func (m *Mutation) storeCorpus(c []byte) bool {
 			return false
 		}
 	}
-	log.Printf("New corpus: '%s'", bytes.Trim(c, "\n\t"))
+
+	// messed up way to prevent string rendering strange stuff (aka prevent multiple line)
+	var cleanedUp []byte
+	for _, b := range c {
+		if b > 0x20 && b < 0x7f {
+			cleanedUp = append(cleanedUp, b)
+		} else {
+			cleanedUp = append(cleanedUp, 0xf0)
+		}
+	}
+	log.Printf("[+] New corpus (preview): '%s'", string(cleanedUp))
 	m.corpus = append(m.corpus, m.clone(c))
 	return true
 }

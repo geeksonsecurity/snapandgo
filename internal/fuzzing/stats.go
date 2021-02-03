@@ -24,6 +24,6 @@ func (s *Stats) StatsMonitor() {
 	for {
 		elapsed := time.Since(s.startTime)
 		log.Printf("[%10.4f] cases %10d | fcps %8.4f | cov %2.1f%% (hit: %3d, tot: %3d) | corpus: %d | crashes: %d", elapsed.Seconds(), s.IterationCount, float64(s.IterationCount)/elapsed.Seconds(), float64(s.FoundBreakpoints)/float64(s.TotalBreakpoints)*100.0, s.FoundBreakpoints, s.TotalBreakpoints, s.CorpusLength, s.Crashes)
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(time.Second)
 	}
 }
