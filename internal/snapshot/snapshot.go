@@ -3,18 +3,16 @@ package snapshot
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"regexp"
 	"snapandgo/internal/ptrace"
 	"strconv"
 	"strings"
 	"syscall"
-
-	// #include <stdio.h>
-	// #include <stdlib.h>
-	"C"
 
 	"golang.org/x/sys/unix"
 )
@@ -56,7 +54,8 @@ type MemorySection struct {
 
 // Manager self explaining
 type Manager struct {
-	Pid int
+	Pid    int
+	Target string
 
 	writableSections []*MemorySection
 	sections         []*MemorySection
@@ -64,9 +63,9 @@ type Manager struct {
 }
 
 // GetXSections return executable sections
-func (p *Manager) GetXSections() []*MemorySection {
+func (m *Manager) GetXSections() []*MemorySection {
 	var xmems []*MemorySection
-	for _, s := range p.sections {
+	for _, s := range m.sections {
 		if s.Perms.Executable() {
 			xmems = append(xmems, s)
 		}
@@ -74,9 +73,47 @@ func (p *Manager) GetXSections() []*MemorySection {
 	return xmems
 }
 
+// ConvertRVA Convert file offset to memory address
+func (m *Manager) ConvertRVA(addr uint64) uint64 {
+	mainSection, _ := m.GetMainSection()
+	return addr - mainSection.Offset + mainSection.From
+}
+
+// ResolveAddress return the function offset
+func (m *Manager) ResolveAddress(funcName string) uint64 {
+	addrRaw, _ := exec.Command("bash", "-c", fmt.Sprintf("nm %s | grep %s | awk '{print $1}'", m.Target, funcName)).Output()
+	addr, _ := strconv.ParseUint(strings.TrimSpace(string(addrRaw)), 16, 64)
+	return m.ConvertRVA(addr)
+}
+
+// GetEntrypoint return main entrypoint
+func (m *Manager) GetEntrypoint() uint64 {
+	startRaw, _ := exec.Command("bash", "-c", fmt.Sprintf("nm %s | grep -sw _start | awk '{print $1}'", m.Target)).Output()
+	start, _ := strconv.ParseUint(strings.TrimSpace(string(startRaw)), 16, 64)
+	return m.ConvertRVA(start)
+}
+
+// GetMainSection return target main executable section
+func (m *Manager) GetMainSection() (*MemorySection, error) {
+	if m.sections == nil {
+		m.LoadMemoryMap()
+	}
+	for _, s := range m.GetXSections() {
+		//log.Printf(">> %s", s.Module)
+		// remove dots to avoid relative paths not matching
+		if strings.Contains(s.Module, strings.ReplaceAll(m.Target, ".", "")) {
+			//log.Printf("Found main executable module 0x%x-0x%x [offset 0x%x]", s.From, s.To, s.Offset)
+			return s, nil
+		}
+	}
+	return nil, errors.New("Unable to locate main section")
+}
+
 // LoadMemoryMap load /proc/id/maps
-func (p *Manager) LoadMemoryMap() {
-	mapsfile, err := os.Open(fmt.Sprintf("/proc/%d/maps", p.Pid))
+func (m *Manager) LoadMemoryMap() {
+	m.sections = nil
+	m.writableSections = nil
+	mapsfile, err := os.Open(fmt.Sprintf("/proc/%d/maps", m.Pid))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -94,9 +131,9 @@ func (p *Manager) LoadMemoryMap() {
 		section.Offset, _ = strconv.ParseUint(lineTokens[2], 16, 0)
 		section.Module = lineTokens[5]
 		section.Size = section.To - section.From
-		p.sections = append(p.sections, &section)
+		m.sections = append(m.sections, &section)
 		if section.Perms.Writable() {
-			p.writableSections = append(p.writableSections, &section)
+			m.writableSections = append(m.writableSections, &section)
 		}
 	}
 
@@ -106,29 +143,29 @@ func (p *Manager) LoadMemoryMap() {
 
 }
 
-// TakeSnapshot takes a memory snapshot of all writable memory region for given pid
-func (p *Manager) TakeSnapshot() {
-	log.Printf("Taking snapshot of PID %d | EIP: 0x%x", p.Pid, ptrace.GetEIP(p.Pid))
+// TakeSnapshot takes a memory snapshot of all writable memory region for given Pid
+func (m *Manager) TakeSnapshot() {
+	log.Printf("Taking snapshot of PID %d | EIP: 0x%x", m.Pid, ptrace.GetEIP(m.Pid))
 
-	for _, s := range p.writableSections {
+	for _, s := range m.writableSections {
 		log.Printf("Reading 0x%x-0x%x [%d bytes] - %s - %s", s.From, s.To, s.Size, s.Perms, s.Module)
 		// TODO: is this the right way to update the object correctly?
 		// Doing s.Content will result in the array not being persisted
-		s.Content = ptrace.Read(p.Pid, uintptr(s.From), s.Size)
+		s.Content = ptrace.Read(m.Pid, uintptr(s.From), s.Size)
 		if uint64(len(s.Content)) != s.Size {
-			log.Panic("Failed to read bytes from target process!")
+			log.Panic("Failed to read bytes from Target process!")
 		}
 	}
 
-	ptrace.SaveRegisters(p.Pid, &p.registers)
-	log.Printf("Registers saved! EIP: 0x%x", p.registers.PC())
+	ptrace.SaveRegisters(m.Pid, &m.registers)
+	log.Printf("Registers saved! EIP: 0x%x", m.registers.PC())
 }
 
-// RestoreSnapshot restore writable pages in the target process
-func (p *Manager) RestoreSnapshot() {
+// RestoreSnapshot restore writable pages in the Target process
+func (m *Manager) RestoreSnapshot() {
 	//TODO: we should use process_vm_writev here (ProcessVMWritev)
-	//log.Printf("Restoring snapshot for PID %d", p.Pid)
-	for _, s := range p.writableSections {
+	//log.Printf("Restoring snapshot for PID %d", m.Pid)
+	for _, s := range m.writableSections {
 
 		//data := []byte{0x1, 0x1, 0x1, 0x1, 0x1, 0x1, 0x1}
 		//log.Printf("Restoring 0x%x-0x%x [%d bytes | backing %p] - %s - %s", s.From, s.To, len(s.Content), &s.Content[0], s.Perms, s.Module)
@@ -141,39 +178,39 @@ func (p *Manager) RestoreSnapshot() {
 		localIovecs = append(localIovecs, localIovec)
 		remoteIovecs = append(remoteIovecs, remoteIovec)
 
-		//log.Printf("Almost ready to restore process %d", p.Pid)
+		//log.Printf("Almost ready to restore process %d", m.Pid)
 		//bufio.NewReader(os.Stdin).ReadBytes('\n')
 
-		written, err := unix.ProcessVMWritev(p.Pid, localIovecs, remoteIovecs, 0)
+		written, err := unix.ProcessVMWritev(m.Pid, localIovecs, remoteIovecs, 0)
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		//log.Printf("Restoring 0x%x-0x%x [%d bytes] - %s - %s", s.From, s.To, s.Size, s.Perms, s.Module)
-		//written := ptrace.Write(p.Pid, uintptr(s.From), s.Content)
+		//written := ptrace.Write(m.Pid, uintptr(s.From), s.Content)
 		if uint64(written) != s.Size {
-			log.Panicf("Failed to write all %d bytes to target process, wrote %d only!", s.Size, written)
+			log.Panicf("Failed to write all %d bytes to Target process, wrote %d only!", s.Size, written)
 		}
 	}
-	ptrace.RestoreRegisters(p.Pid, &p.registers)
-	//log.Printf("Registers restored! EIP: 0x%x", p.registers.PC())
+	ptrace.RestoreRegisters(m.Pid, &m.registers)
+	//log.Printf("Registers restored! EIP: 0x%x", m.registers.PC())
 }
 
 // RewindEIP rewind EIP by one
-func (p *Manager) RewindEIP() {
+func (m *Manager) RewindEIP() {
 	// rewin RIP
 	var regs syscall.PtraceRegs
-	syscall.PtraceGetRegs(p.Pid, &regs)
+	syscall.PtraceGetRegs(m.Pid, &regs)
 	regs.SetPC(regs.PC() - 1)
-	err := syscall.PtraceSetRegs(p.Pid, &regs)
+	err := syscall.PtraceSetRegs(m.Pid, &regs)
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
 // Locate locate payload in RW sections
-func (p *Manager) Locate(payload []byte) uint64 {
-	for _, s := range p.writableSections {
+func (m *Manager) Locate(payload []byte) uint64 {
+	for _, s := range m.writableSections {
 		log.Printf("Searching in 0x%x-0x%x [%d bytes]", s.From, s.To, len(s.Content))
 		idx := bytes.Index(s.Content, payload)
 		if idx > -1 {
