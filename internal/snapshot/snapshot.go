@@ -73,24 +73,30 @@ func (m *Manager) GetXSections() []*MemorySection {
 	return xmems
 }
 
-// ConvertRVA Convert file offset to memory address
-func (m *Manager) ConvertRVA(addr uint64) uint64 {
+// ConvertRelativeAddress Convert RVA to absolute memory address
+func (m *Manager) ConvertRelativeAddress(addr uint64) uint64 {
 	mainSection, _ := m.GetMainSection()
 	return addr - mainSection.Offset + mainSection.From
+}
+
+// ConvertRelativeAddressWoOffset Convert RVA to absolute memory address (without adding section offset)
+func (m *Manager) ConvertRelativeAddressWoOffset(addr uint64) uint64 {
+	mainSection, _ := m.GetMainSection()
+	return addr + mainSection.From
 }
 
 // ResolveAddress return the function offset
 func (m *Manager) ResolveAddress(funcName string) uint64 {
 	addrRaw, _ := exec.Command("bash", "-c", fmt.Sprintf("nm %s | grep %s | awk '{print $1}'", m.Target, funcName)).Output()
 	addr, _ := strconv.ParseUint(strings.TrimSpace(string(addrRaw)), 16, 64)
-	return m.ConvertRVA(addr)
+	return m.ConvertRelativeAddress(addr)
 }
 
 // GetEntrypoint return main entrypoint
 func (m *Manager) GetEntrypoint() uint64 {
 	startRaw, _ := exec.Command("bash", "-c", fmt.Sprintf("nm %s | grep -sw _start | awk '{print $1}'", m.Target)).Output()
 	start, _ := strconv.ParseUint(strings.TrimSpace(string(startRaw)), 16, 64)
-	return m.ConvertRVA(start)
+	return m.ConvertRelativeAddress(start)
 }
 
 // GetMainSection return target main executable section

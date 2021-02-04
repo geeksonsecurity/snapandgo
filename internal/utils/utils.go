@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"log"
 	"syscall"
 )
 
@@ -28,5 +29,15 @@ func ExplainWaitStatus(ws syscall.WaitStatus) string {
 		return fmt.Sprint("continued")
 	default:
 		return fmt.Sprintf("unknown status %d", ws)
+	}
+}
+
+// DisableASLR disable randomization of VA space via SYS_PERSONALITY
+func DisableASLR() {
+	//ADDR_NO_RANDOMIZE disable randomization of VA space
+	_, _, errno := syscall.Syscall(syscall.SYS_PERSONALITY, 0x0040000, uintptr(0), uintptr(0))
+
+	if errno != 0 {
+		log.Fatalf("Failed to disable ASLR: %s", errno.Error())
 	}
 }

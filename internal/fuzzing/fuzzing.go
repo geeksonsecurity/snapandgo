@@ -17,15 +17,14 @@ import (
 
 // Fuzzer handle the fuzzing stuff
 type Fuzzer struct {
-	Base uint64
-
-	snapshot       *snapshot.Manager
-	mutationEngine *Mutation
-	stats          *Stats
+	Target           string
+	BreakpointSource string
+	snapshot         *snapshot.Manager
+	mutationEngine   *Mutation
+	stats            *Stats
 
 	start          uint64
 	end            uint64
-	target         string
 	targetPid      int
 	initialPayload string
 	breakpoints    map[uint64]byte
@@ -34,16 +33,28 @@ type Fuzzer struct {
 	crashes        []uint64
 }
 
-func (f *Fuzzer) loadInitialState() {
-
-	f.stats = &Stats{
-		IterationCount: 0,
-	}
+func (f *Fuzzer) loadBreakpointsFromPath(bpFile string) {
 	f.breakpoints = make(map[uint64]byte)
-	f.start = f.snapshot.ResolveAddress("startf")
-	f.end = f.snapshot.ResolveAddress("endf")
-	log.Printf("Located start @ 0x%x and end @ 0x%x", f.start, f.end)
-	outputRaw, err := exec.Command("objdump", "-d", "-j", ".text", f.target).Output()
+	inFile, err := os.Open(bpFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer inFile.Close()
+
+	scanner := bufio.NewScanner(inFile)
+
+	for scanner.Scan() {
+		val, _ := strconv.ParseUint(strings.Replace(scanner.Text(), "0x", "", -1), 16, 64)
+		addr := f.snapshot.ConvertRelativeAddressWoOffset(val)
+		f.breakpoints[addr] = ptrace.Read(f.targetPid, uintptr(addr), 1)[0]
+		//log.Printf("Loaded breakpoint @ 0x%x", addr)
+	}
+
+	log.Printf("Loaded %d breakpoints", len(f.breakpoints))
+}
+
+func (f *Fuzzer) loadBreakpointsFromObjdump() {
+	outputRaw, err := exec.Command("objdump", "-d", "-j", ".text", f.Target).Output()
 
 	if err != nil {
 		log.Fatal(err)
@@ -66,11 +77,31 @@ func (f *Fuzzer) loadInitialState() {
 		r, _ := regexp.Compile("^\\s*([0-9a-f]+)")
 		match := r.FindString(line)
 		addr, _ := strconv.ParseUint(strings.TrimSpace(match), 16, 64)
-		addr = f.snapshot.ConvertRVA(addr)
+		addr = f.snapshot.ConvertRelativeAddress(addr)
 		f.breakpoints[addr] = ptrace.Read(f.targetPid, uintptr(addr), 1)[0]
-		//log.Printf("Loaded breakpoint @ %x", addr)
+		//log.Printf("Loaded breakpoint @ 0x%x", addr)
 	}
 	log.Printf("Loaded %d breakpoints!", len(f.breakpoints))
+}
+
+func (f *Fuzzer) loadInitialState() {
+
+	f.stats = &Stats{
+		IterationCount: 0,
+	}
+	f.breakpoints = make(map[uint64]byte)
+	f.start = f.snapshot.ResolveAddress("startf")
+	f.end = f.snapshot.ResolveAddress("endf")
+	log.Printf("Located start @ 0x%x and end @ 0x%x", f.start, f.end)
+
+	if f.BreakpointSource != "" {
+		log.Printf("Loading breakpoints from file %s", f.BreakpointSource)
+		f.loadBreakpointsFromPath(f.BreakpointSource)
+	} else {
+		log.Printf("Computing breakpoints with objdump")
+		f.loadBreakpointsFromObjdump()
+	}
+
 	f.stats.TotalBreakpoints = len(f.breakpoints)
 	return
 }
@@ -98,9 +129,7 @@ func (f *Fuzzer) mutateInput() {
 }
 
 // Init the Fuzzer instance
-func (f *Fuzzer) Init(target string, breakpointsPath string) {
-
-	f.target = target
+func (f *Fuzzer) init() {
 	devNull := os.NewFile(0, os.DevNull)
 	//FIXME: why child keeps sending output to stdout?
 	procAttr := syscall.ProcAttr{
@@ -116,15 +145,15 @@ func (f *Fuzzer) Init(target string, breakpointsPath string) {
 
 	var err error
 	runtime.LockOSThread()
-	f.targetPid, err = syscall.ForkExec(target, []string{"target", f.initialPayload}, &procAttr)
+	f.targetPid, err = syscall.ForkExec(f.Target, []string{"Target", f.initialPayload}, &procAttr)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	log.Printf("Started target process with PID %d, Parent is %d", f.targetPid, os.Getpid())
+	log.Printf("Started Target process with PID %d, Parent is %d", f.targetPid, os.Getpid())
 	f.snapshot = &snapshot.Manager{
 		Pid:    f.targetPid,
-		Target: f.target,
+		Target: f.Target,
 	}
 
 	f.mutationEngine = &Mutation{}
@@ -178,14 +207,15 @@ func (f *Fuzzer) restore() {
 
 // Fuzz Start fuzzing task
 func (f *Fuzzer) Fuzz() {
+	f.init()
 	// waiting stop at entrypoint
 	var wstat syscall.WaitStatus
 	syscall.Wait4(f.targetPid, &wstat, 0, nil)
 	log.Printf("Trapped at beginning of traced process @ 0x%x", ptrace.GetEIP(f.targetPid))
 
 	//Apparently with ptrace we land before the loader finishes its job (_start@ld-linux )
-	//This causes the memory map to change till the real binary entrypoint is hit (_start@target symbol)
-	//To correctly read the memory segments we therefore need to force a reload when we are at the main target entrypoint!
+	//This causes the memory map to change till the real binary entrypoint is hit (_start@Target symbol)
+	//To correctly read the memory segments we therefore need to force a reload when we are at the main Target entrypoint!
 	entrypoint := f.snapshot.GetEntrypoint()
 	log.Printf("Breaking on main binary entrypoint _start 0x%x", entrypoint)
 	f.waitForBreakpoint(entrypoint)
